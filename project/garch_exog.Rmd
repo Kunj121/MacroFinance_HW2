@@ -3,3 +3,55 @@ title: "garch_exog"
 output: html_document
 ---
 
+```{r}
+merged_df <- read.csv("merged_df.csv")
+
+# install.packages("rugarch")  # uncomment if you need to install
+library(rugarch)
+library(ggplot2)
+
+
+ret <- merged_df$SPY
+x   <- merged_df$numeric_sentiment
+
+# 2. Build the exogenous matrix for the variance model
+x_mat <- matrix(x, ncol = 1)
+colnames(x_mat) <- "sentiment"
+
+# 3. Specify a GARCH(1,1) with sentiment in the variance equation
+spec <- ugarchspec(
+  variance.model = list(
+    model             = "sGARCH",
+    garchOrder        = c(1, 1),
+    external.regressors = x_mat
+  ),
+  mean.model = list(
+    armaOrder   = c(0, 0),
+    include.mean = TRUE
+  ),
+  distribution.model = "norm"
+)
+
+# 4. Fit the model
+fit <- ugarchfit(spec = spec, data = ret)
+show(fit)
+
+# 5. Extract the in‐sample conditional volatility
+sigma_t <- sigma(fit)
+
+# 6. Plot it
+df_sigma <- data.frame(
+  Date  = data$date,
+  Sigma = sigma_t * sqrt(252)
+)
+
+ggplot(df_sigma, aes(x = Date, y = Sigma, group = 1)) +
+  geom_line() +
+  labs(
+    title = "Fitted GARCH(1,1) σₜ with Sentiment as Exogenous",
+    x     = "Date",
+    y     = "Conditional Volatility (%)"
+  ) +
+  theme_minimal()
+
+```
