@@ -1,1 +1,4 @@
 .env
+AGG_MINUTE.parquet
+SPY_MINUTE.parquet
+TLT_MINUTE.parquet
