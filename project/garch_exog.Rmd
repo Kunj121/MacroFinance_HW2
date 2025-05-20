@@ -55,3 +55,77 @@ ggplot(df_sigma, aes(x = Date, y = Sigma, group = 1)) +
   theme_minimal()
 
 ```
+
+```{r}
+# expanding_garch.R
+
+# 0. Libraries
+if(!require(rugarch)) install.packages("rugarch"); library(rugarch)
+
+# 1. Prepare your data
+# Assume merged_df has columns: Date (Date/POSIXct), price (numeric), sentiment (numeric)
+df <- na.omit(merged_df[, c("date", "SPY", "numeric_sentiment")])
+
+dates    <- df$date
+rets     <- df$SPY
+x_series <- df$numeric_sentiment
+
+# 2. Parameters
+N              <- length(merged_df$date)
+initial_window <- 126       # e.g. first 1 year of daily data
+sigma_pred     <- rep(NA, N) # to store 1-day ahead σ
+
+# 3. Loop over the expanding window
+for(t in initial_window:(N-1)){
+  
+  # a) subset returns & exog up to time t
+  ret_sub <- rets[1:t]
+  x_sub   <- matrix(x_series[1:t], ncol=1)
+  colnames(x_sub) <- "sentiment"
+  
+  # b) build spec (with exogenous in var. eqn)
+  spec <- ugarchspec(
+    variance.model = list(
+      model              = "sGARCH",
+      garchOrder         = c(1,1),
+      external.regressors = x_sub    # *remove this line* for no x
+    ),
+    mean.model = list(
+      armaOrder    = c(0,0),
+      include.mean = TRUE
+    ),
+    distribution.model = "norm"
+  )
+  
+  # c) fit
+  fit <- ugarchfit(spec, data = ret_sub, solver = "hybrid", 
+                    fit.control = list(stationarity = 1), 
+                    solver.control = list(trace = 0))
+  
+  # d) forecast one step out, providing next exog
+  x_next <- matrix(x_series[t+1], nrow=1)
+  colnames(x_next) <- "sentiment"
+  fc <- ugarchforecast(
+    fit,
+    n.ahead            = 1,
+    external.forecasts = list(vregfor = x_next)  # omit for no x
+  )
+  
+  # e) extract σₜ₊₁
+  sigma_pred[t+1] <- as.numeric(sigma(fc))
+}
+
+# 4. Combine dates & preds, write to CSV
+out <- data.frame(
+  Date      = dates,
+  sigma_hat = sigma_pred
+)
+write.csv(out, "expanding_garch_forecasts.csv", row.names = FALSE)
+
+# 5. (Optional) Quick plot
+# library(ggplot2)
+# ggplot(out, aes(Date, sigma_hat)) + geom_line() + theme_minimal() +
+#   labs(title="Expanding-window GARCH(1,1) σ forecasts", y="σ forecast (%)")
+
+```
+
