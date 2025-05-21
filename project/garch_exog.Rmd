@@ -385,7 +385,382 @@ write.csv(
   row.names = FALSE
 )
 
-# 8. (Optional) inspect head
+# 8. (Optional) inspect head 
 print(head(results)).
 
+```
+
+```{r}
+---
+title: "garch_exog"
+output: html_document
+---
+```
+
+```{r}
+merged_df <- read.csv("merged_df.csv")
+
+# install.packages("rugarch")  # uncomment if you need to install
+library(rugarch)
+library(ggplot2)
+
+
+ret <- merged_df$SPY
+x   <- merged_df$numeric_sentiment
+
+# 2. Build the exogenous matrix for the variance model
+x_mat <- matrix(x, ncol = 1)
+colnames(x_mat) <- "sentiment"
+
+# 3. Specify a GARCH(1,1) with sentiment in the variance equation
+spec <- ugarchspec(
+  variance.model = list(
+    model             = "sGARCH",
+    garchOrder        = c(1, 1),
+    external.regressors = x_mat
+  ),
+  mean.model = list(
+    armaOrder   = c(0, 0),
+    include.mean = TRUE
+  ),
+  distribution.model = "norm"
+)
+
+# 4. Fit the model
+fit <- ugarchfit(spec = spec, data = ret)
+show(fit)
+
+# 5. Extract the in‐sample conditional volatility
+sigma_t <- sigma(fit)
+
+# 6. Plot it
+df_sigma <- data.frame(
+  Date  = data$date,
+  Sigma = sigma_t * sqrt(252)
+)
+
+ggplot(df_sigma, aes(x = Date, y = Sigma, group = 1)) +
+  geom_line() +
+  labs(
+    title = "Fitted GARCH(1,1) σₜ with Sentiment as Exogenous",
+    x     = "Date",
+    y     = "Conditional Volatility (%)"
+  ) +
+  theme_minimal()
+coef_table <- fit@fit$matcoef
+coef_table
+```
+
+```{r}
+# expanding_garch.R
+
+# 0. Libraries
+if(!require(rugarch)) install.packages("rugarch"); library(rugarch)
+
+# 1. Prepare your data
+# Assume merged_df has columns: Date (Date/POSIXct), price (numeric), sentiment (numeric)
+df <- na.omit(merged_df[, c("date", "SPY", "numeric_sentiment")])
+
+dates    <- df$date
+rets     <- df$SPY
+x_series <- df$numeric_sentiment
+
+# 2. Parameters
+N              <- length(merged_df$date)
+initial_window <- 126       # e.g. first 1 year of daily data
+sigma_pred     <- rep(NA, N) # to store 1-day ahead σ
+
+# 3. Loop over the expanding window
+for(t in initial_window:(N-1)){
+  
+  # a) subset returns & exog up to time t
+  ret_sub <- rets[1:t]
+  x_sub   <- matrix(x_series[1:t], ncol=1)
+  colnames(x_sub) <- "sentiment"
+  
+  # b) build spec (with exogenous in var. eqn)
+  spec <- ugarchspec(
+    variance.model = list(
+      model              = "sGARCH",
+      garchOrder         = c(1,1),
+      external.regressors = x_sub    # *remove this line* for no x
+    ),
+    mean.model = list(
+      armaOrder    = c(0,0),
+      include.mean = TRUE
+    ),
+    distribution.model = "norm"
+  )
+  
+  # c) fit
+  fit <- ugarchfit(spec, data = ret_sub, solver = "hybrid", 
+                    fit.control = list(stationarity = 1), 
+                    solver.control = list(trace = 0))
+  
+  # d) forecast one step out, providing next exog
+  x_next <- matrix(x_series[t+1], nrow=1)
+  colnames(x_next) <- "sentiment"
+  fc <- ugarchforecast(
+    fit,
+    n.ahead            = 1,
+    external.forecasts = list(vregfor = x_next)  # omit for no x
+  )
+  
+  # e) extract σₜ₊₁
+  sigma_pred[t+1] <- as.numeric(sigma(fc))
+}
+
+# 4. Combine dates & preds, write to CSV
+out <- data.frame(
+  Date      = dates,
+  SPY = sigma_pred
+)
+write.csv(out, "expanding_garch_forecasts.csv", row.names = FALSE)
+
+# 5. (Optional) Quick plot
+# library(ggplot2)
+# ggplot(out, aes(Date, sigma_hat)) + geom_line() + theme_minimal() +
+#   labs(title="Expanding-window GARCH(1,1) σ forecasts", y="σ forecast (%)")
+
+```
+
+```{r}
+# expanding_garch_multiple.R
+colnames(merged_df)
+
+# 0. Libraries
+if (!require(rugarch)) install.packages("rugarch"); library(rugarch)
+
+# 1. Prepare your data
+# Assume merged_df has columns: date (Date), numeric_sentiment, and one column per asset price
+merged_df <- na.omit(merged_df)
+merged_df$date <- as.Date(merged_df$date)  # ensure Date class
+
+# 2. Specify which assets to process
+assets <- c("SPY", "QQQ", "IWM", "EFA", "EEM", "AGG", "TLT", "GLD", "USO", "VNQ", "GSG", "HYG", "IBIT")  # replace with your column names
+
+# 3. Common parameters
+N              <- nrow(merged_df)
+initial_window <- 126             # e.g. first half-year for daily data
+
+# 4. Pre-extract sentiment and dates
+sentiment <- merged_df$numeric_sentiment
+dates     <- merged_df$date
+
+# 5. Initialize results data.frame
+results <- data.frame(Date = dates)
+
+# 6. Loop over each asset
+for (asset in assets) {
+  # 6a. Compute log-returns * 100
+  ret <- merged_df[[asset]]
+
+  # 6b. Prepare storage for one-step-ahead σ forecasts
+  sigma_pred <- rep(NA_real_, N)
+
+  # 6c. Expanding-window loop
+  for (t in initial_window:(N - 1)) {
+
+    # subset returns and exogenous up to time t
+    ret_sub <- ret[1:t]
+    x_sub   <- matrix(sentiment[1:t], ncol = 1)
+    colnames(x_sub) <- "sentiment"
+
+    # specify GARCH(1,1)-X
+    spec <- ugarchspec(
+      variance.model = list(
+        model              = "sGARCH",
+        garchOrder         = c(1, 1),
+        external.regressors = x_sub
+      ),
+      mean.model = list(
+        armaOrder    = c(0, 0),
+        include.mean = TRUE
+      ),
+      distribution.model = "norm"
+    )
+
+    # fit model
+    fit <- ugarchfit(
+      spec    = spec,
+      data    = ret_sub,
+      solver  = "hybrid",
+      fit.control    = list(stationarity = 1),
+      solver.control = list(trace        = 0)
+    )
+
+    # forecast one step ahead, supplying next exogenous
+    x_next <- matrix(sentiment[t + 1], nrow = 1)
+    colnames(x_next) <- "sentiment"
+    fc <- ugarchforecast(
+      fit,
+      n.ahead            = 1,
+      external.forecasts = list(vregfor = x_next)
+    )
+
+    # store σₜ₊₁
+    sigma_pred[t + 1] <- as.numeric(sigma(fc))
+  }
+
+  # 6d. Attach this series to results under the asset name
+  results[[asset]] <- sigma_pred
+}
+
+# 7. Write all forecasts to CSV
+write.csv(
+  results,
+  "expanding_garch_forecasts.csv",
+  row.names = FALSE
+)
+
+# 8. (Optional) inspect head
+print(head(results))
+
+```
+
+```{r}
+
+# expanding_garch.R
+
+# 0. Libraries
+if(!require(rugarch)) install.packages("rugarch"); library(rugarch)
+
+# 1. Prepare your data
+# Assume merged_df has columns: Date (Date/POSIXct), price (numeric), sentiment (numeric)
+df <- na.omit(merged_df[, c("date", "SPY", "numeric_sentiment")])
+
+dates    <- df$date
+rets     <- df$SPY
+x_series <- df$numeric_sentiment
+
+# 2. Parameters
+N              <- length(merged_df$date)
+initial_window <- 126       # e.g. first 1 year of daily data
+sigma_pred     <- rep(NA, N) # to store 1-day ahead σ
+
+# 3. Loop over the expanding window
+for(t in initial_window:(N-1)){
+  
+  # a) subset returns & exog up to time t
+  ret_sub <- rets[1:t]
+  x_sub   <- matrix(x_series[1:t], ncol=1)
+  colnames(x_sub) <- "sentiment"
+  
+  # b) build spec (with exogenous in var. eqn)
+  spec <- ugarchspec(
+    variance.model = list(
+      model              = "sGARCH",
+      garchOrder         = c(1,1),
+      external.regressors = x_sub    # *remove this line* for no x
+    ),
+    mean.model = list(
+      armaOrder    = c(0,0),
+      include.mean = TRUE
+    ),
+    distribution.model = "norm"
+  )
+  
+  # c) fit
+  fit <- ugarchfit(spec, data = ret_sub, solver = "hybrid", 
+                    fit.control = list(stationarity = 1), 
+                    solver.control = list(trace = 0))
+  
+  # d) forecast one step out, providing next exog
+  x_next <- matrix(x_series[t+1], nrow=1)
+  colnames(x_next) <- "sentiment"
+  fc <- ugarchforecast(
+    fit,
+    n.ahead            = 1,
+    external.forecasts = list(vregfor = x_next)  # omit for no x
+  )
+  
+  # e) extract σₜ₊₁
+  sigma_pred[t+1] <- as.numeric(sigma(fc))
+}
+
+# 4. Combine dates & preds, write to CSV
+out <- data.frame(
+  Date      = dates,
+  SPY = sigma_pred
+)
+write.csv(out, "expanding_garch_forecasts.csv", row.names = FALSE)
+
+# 5. (Optional) Quick plot
+# library(ggplot2)
+# ggplot(out, aes(Date, sigma_hat)) + geom_line() + theme_minimal() +
+#   labs(title="Expanding-window GARCH(1,1) σ forecasts", y="σ forecast (%)")
+
+```
+
+```{r get all full sample p-values and coefs}
+
+
+# 1. Prepare your data
+# merged_df has columns: date (Date), numeric_sentiment, and one column per asset price
+merged_df <- na.omit(merged_df)
+merged_df$date <- as.Date(merged_df$date)
+
+# 2. Specify which assets to process
+assets <- c("SPY", "QQQ", "IWM", "EFA", "EEM",
+            "AGG", "TLT", "GLD", "USO", "VNQ",
+            "GSG", "HYG", "IBIT")
+
+# 3. Pull out sentiment vector once
+sentiment <- merged_df$numeric_sentiment
+x_mat     <- matrix(sentiment, ncol = 1)
+colnames(x_mat) <- "sentiment"
+
+# 4. Initialize results: rows = assets, two cols (beta & p-value)
+results <- data.frame(
+  beta_sentiment    = rep(NA_real_, length(assets)),
+  p_value_sentiment = rep(NA_real_, length(assets)),
+  row.names         = assets
+)
+
+# 5. Loop over each asset, fit GARCH-X, extract coef & p-value
+for(asset in assets) {
+
+  ret   <- merged_df[[asset]]
+  
+  # 5b. Build spec with sentiment in the variance eqn
+  spec <- ugarchspec(
+    variance.model = list(
+      model               = "sGARCH",
+      garchOrder          = c(1, 1),
+      external.regressors = x_mat
+    ),
+    mean.model = list(
+      armaOrder     = c(0, 0),
+      include.mean  = TRUE
+    ),
+    distribution.model = "norm"
+  )
+  
+  # 5c. Fit on full sample of returns
+  fit <- ugarchfit(
+    spec            = spec,
+    data            = ret,
+    solver          = "hybrid",
+    fit.control     = list(stationarity = 1),
+    solver.control  = list(trace        = 0)
+  )
+  
+  # 5d. Extract robust coefficient matrix
+  cm <- fit@fit$robust.matcoef
+  reg_row <- grep("^vxreg", rownames(cm), value = TRUE)
+  # if you have only one exogenous in the variance, reg_row should be length 1
+  
+  # 3) Extract beta & p‐value
+  beta_sentiment <- cm["vxreg1", 1]
+  pval_sentiment <- cm["vxreg1", "Pr(>|t|)"]
+  
+  # 4) Store into your results
+  results[asset, "beta_sentiment"]    <- beta_sentiment
+  results[asset, "p_value_sentiment"] <- pval_sentiment
+}
+
+# 6. Inspect and (optionally) save
+print(results)
+
+write.csv(results, "garchX_sentiment_coefs.csv", row.names = TRUE)
 ```
