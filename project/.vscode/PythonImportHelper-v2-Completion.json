@@ -685,6 +685,15 @@
         "documentation": {}
     },
     {
+        "label": "calc_dynamic_tangency_weights",
+        "kind": 2,
+        "importPath": "cmds.portfolio_management_helper",
+        "description": "cmds.portfolio_management_helper",
+        "peekOfCode": "def calc_dynamic_tangency_weights(\n    returns: pd.DataFrame,\n    variances: pd.DataFrame,\n    annual_factor: int = 12,\n    expected_returns: Union[pd.Series, pd.DataFrame] = None,\n    expected_returns_already_annualized: bool = False,\n    target_ret_rescale_weights: Union[None, float] = None,\n    name: str = 'Dynamic Tangency',\n    cov_regularization: float = 0,\n    return_port_ret: bool = False",
+        "detail": "cmds.portfolio_management_helper",
+        "documentation": {}
+    },
+    {
         "label": "calc_equal_weights",
         "kind": 2,
         "importPath": "cmds.portfolio_management_helper",

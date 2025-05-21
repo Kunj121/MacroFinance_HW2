@@ -811,6 +811,208 @@ def calc_tangency_weights(
         return port_returns
     return tangency_wts
 
+def calc_dynamic_tangency_weights(
+    returns: pd.DataFrame,
+    variances: pd.DataFrame,
+    annual_factor: int = 12,
+    expected_returns: Union[pd.Series, pd.DataFrame] = None,
+    expected_returns_already_annualized: bool = False,
+    target_ret_rescale_weights: Union[None, float] = None,
+    name: str = 'Dynamic Tangency',
+    cov_regularization: float = 0,
+    return_port_ret: bool = False
+):
+    """
+    Calculates tangency portfolio weights that adjust dynamically based on time-varying asset variances.
+    
+    Parameters:
+    returns (pd.DataFrame): Time series of asset returns with dates as index and assets as columns.
+    variances (pd.DataFrame): Time series of asset variances with dates as index and assets as columns.
+                             Each value represents the variance of the asset on that date.
+    annual_factor (int, default=12): Factor for annualizing returns.
+    expected_returns (pd.Series or pd.DataFrame, default=None): Expected returns for each asset.
+                                                               If None, uses historical mean returns.
+    expected_returns_already_annualized (bool, default=False): If True, assumes expected_returns are already annualized.
+    target_ret_rescale_weights (float or None, default=None): Target return for rescaling weights.
+    name (str, default='Dynamic Tangency'): Name for labeling the weights and portfolio.
+    cov_regularization (float, default=0): Regularization parameter for the covariance matrix (between 0 and 1).
+                                          0 means no regularization, 1 means diagonal matrix.
+    return_port_ret (bool, default=False): If True, returns portfolio returns instead of weights.
+
+    Returns:
+    pd.DataFrame: Time series of tangency portfolio weights or returns based on return_port_ret.
+    
+    Notes:
+    - If the variance dataframe contains constant values for each asset over time, the results will be 
+      equivalent to using calc_tangency_weights.
+    - The function uses the correlation matrix derived from the historical returns and combines it with
+      the time-varying variances to construct each date's covariance matrix.
+    """
+    # Make copies to avoid modifying originals
+    returns = returns.copy()
+    variances = variances.copy()
+    
+    # Ensure proper index naming and conversion
+    if 'date' in returns.columns.str.lower():
+        returns = returns.rename({'Date': 'date'}, axis=1)
+        returns = returns.set_index('date')
+    returns.index.name = 'date'
+    
+    if 'date' in variances.columns.str.lower():
+        variances = variances.rename({'Date': 'date'}, axis=1)
+        variances = variances.set_index('date')
+    variances.index.name = 'date'
+    
+    # Ensure all dataframes have matching columns
+    common_assets = sorted(list(set(returns.columns) & set(variances.columns)))
+    if not common_assets:
+        raise ValueError("No common assets found between returns and variances dataframes")
+    
+    returns = returns[common_assets]
+    variances = variances[common_assets]
+    
+    # Handle missing values in the variance dataframe
+    variances = variances.fillna(method='ffill').fillna(method='bfill')
+    
+    # Calculate correlation matrix from returns data
+    correlation_matrix = returns.corr()
+    
+    # Calculate expected returns if not provided
+    if expected_returns is not None:
+        if isinstance(expected_returns, pd.DataFrame):
+            mu = expected_returns[common_assets].copy()
+            if isinstance(mu, pd.DataFrame) and len(mu.columns) == 1:
+                # Convert single-column DataFrame to Series
+                mu = mu.iloc[:, 0]
+        elif isinstance(expected_returns, pd.Series):
+            mu = expected_returns[common_assets].copy()
+        else:
+            mu = pd.Series(expected_returns, index=common_assets)
+        
+        if not expected_returns_already_annualized:
+            mu *= annual_factor
+    else:
+        # Use historical mean returns
+        mu = returns[common_assets].mean() * annual_factor
+    
+    # Initialize DataFrame to store daily weights
+    dynamic_weights = pd.DataFrame(index=variances.index, columns=common_assets)
+    
+    # For each date in the variance dataframe
+    for date in variances.index:
+        try:
+            # Get variances for this date
+            daily_variances = variances.loc[date, common_assets]
+            
+            # Check for missing values
+            if daily_variances.isnull().any():
+                print(f"Warning: Missing variance values for date {date}. Using most recent available values.")
+                # This should be rare since we filled values earlier
+                continue
+            
+            # Construct the covariance matrix
+            # If cov_regularization is 0, we use the full correlation matrix
+            # If cov_regularization is 1, we use only the diagonal (variances)
+            if cov_regularization < 1:
+                # Convert variances to standard deviations
+                std_devs = np.sqrt(daily_variances)
+                
+                # Create diagonal matrix of standard deviations
+                std_diag = np.diag(std_devs)
+                
+                # Construct covariance matrix using correlation and variances
+                # Cov = D * R * D where D is diagonal matrix of std devs and R is correlation matrix
+                full_cov = std_diag @ correlation_matrix.values @ std_diag
+                
+                if cov_regularization > 0:
+                    # Apply regularization by blending with diagonal matrix
+                    diag_cov = np.diag(np.diag(full_cov))
+                    cov_matrix = (1 - cov_regularization) * full_cov + cov_regularization * diag_cov
+                else:
+                    cov_matrix = full_cov
+            else:
+                # Just use the diagonal (no correlation)
+                cov_matrix = np.diag(daily_variances)
+            
+            # Calculate inverse of annualized covariance matrix
+            try:
+                cov_inv = np.linalg.inv(cov_matrix * annual_factor)
+            except np.linalg.LinAlgError:
+                print(f"Warning: Singular covariance matrix for date {date}. Using pseudo-inverse.")
+                # Use pseudo-inverse if matrix is singular
+                cov_inv = np.linalg.pinv(cov_matrix * annual_factor)
+            
+            # Vector of ones for constraint
+            ones = np.ones(len(common_assets))
+            
+            # Calculate tangency weights
+            scaling = 1 / (ones @ cov_inv @ mu)
+            tangent_weights = scaling * (cov_inv @ mu)
+            
+            # Store weights for this date
+            dynamic_weights.loc[date, common_assets] = tangent_weights
+            
+        except Exception as e:
+            print(f"Error calculating weights for date {date}: {str(e)}")
+            # Use previous weights or NaN
+            if date > dynamic_weights.index[0]:
+                prev_idx = dynamic_weights.index.get_loc(date) - 1
+                if prev_idx >= 0:  # Ensure we have a valid previous index
+                    dynamic_weights.loc[date] = dynamic_weights.iloc[prev_idx]
+                else:
+                    dynamic_weights.loc[date] = np.nan
+            else:
+                dynamic_weights.loc[date] = np.nan
+    
+    # Fill any missing weights
+    if dynamic_weights.isnull().any().any():
+        # Try forward fill first
+        dynamic_weights = dynamic_weights.fillna(method='ffill')
+        
+        # Then try backward fill for any remaining NaNs
+        if dynamic_weights.isnull().any().any():
+            dynamic_weights = dynamic_weights.fillna(method='bfill')
+            
+            # If still have NaNs, use equal weights
+            if dynamic_weights.isnull().any().any():
+                print("Warning: Some dates could not be filled with valid weights. Using equal weights for these dates.")
+                equal_weight = 1.0 / len(common_assets)
+                dynamic_weights = dynamic_weights.fillna(equal_weight)
+    
+    # Calculate portfolio returns if requested or needed for rescaling
+    if return_port_ret or isinstance(target_ret_rescale_weights, (float, int)):
+        # We'll calculate returns for dates that are in both returns and weights
+        common_dates = sorted(list(set(returns.index) & set(dynamic_weights.index)))
+        port_returns = pd.DataFrame(index=common_dates, columns=[f'{name} Portfolio'])
+        
+        for date in common_dates:
+            if date in returns.index:
+                # Get weights and returns for this date
+                date_weights = dynamic_weights.loc[date, common_assets]
+                date_returns = returns.loc[date, common_assets]
+                # Calculate portfolio return for this date
+                port_returns.loc[date, f'{name} Portfolio'] = (date_returns * date_weights).sum()
+    
+    # Rescale weights if target return is specified
+    if isinstance(target_ret_rescale_weights, (float, int)):
+        avg_port_return = port_returns[f'{name} Portfolio'].mean()
+        if avg_port_return != 0:
+            scaler = target_ret_rescale_weights / avg_port_return
+            
+            dynamic_weights *= scaler
+            port_returns *= scaler
+            
+            # Update names to reflect rescaling
+            name = f"{name} Rescaled Target {target_ret_rescale_weights:.2%}"
+            port_returns = port_returns.rename(columns={f'{name.split(" Rescaled")[0]} Portfolio': f'{name} Portfolio'})
+    
+    # Rename columns to indicate these are weights
+    dynamic_weights = dynamic_weights.rename(columns=lambda c: f"{name} {c} Weight")
+    
+    if return_port_ret:
+        return port_returns
+    else:
+        return dynamic_weights
 
 def calc_equal_weights(
     returns: pd.DataFrame,
